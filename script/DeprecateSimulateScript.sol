@@ -2,7 +2,9 @@
 pragma solidity ^0.8.6;
 
 import "forge-std/Script.sol";
+import "forge-std/Test.sol";
 
+import "@jbx-protocol/contracts-v1/contracts/interfaces/IProjects.sol";
 import "@jbx-protocol/contracts-v1/contracts/interfaces/IFundingCycles.sol";
 import "@jbx-protocol/contracts-v1/contracts/interfaces/IModStore.sol";
 import "@jbx-protocol/contracts-v1/contracts/interfaces/ITerminal.sol";
@@ -15,7 +17,9 @@ import "@jbx-protocol/contracts-v2/contracts/interfaces/IJBSplitsStore.sol";
 import "@jbx-protocol/contracts-v2/contracts/interfaces/IJBPayoutRedemptionPaymentTerminal.sol";
 import "@jbx-protocol/contracts-v2/contracts/libraries/JBSplitsGroups.sol";
 
-contract DeprecateSimulateScript is Script {
+contract DeprecateSimulateScript is Script, Test {
+    address immutable fundedWallet = address(0x0Bc1b73d735083Adb4f26671BC90B68a86B33dE4);
+
      // JB Multisig
     address immutable multisig = address(0xAF28bcB48C40dBC86f52D459A6562F658fc94B1e);   
     uint256 immutable projectId = 1;
@@ -24,6 +28,7 @@ contract DeprecateSimulateScript is Script {
     Governance immutable public governance = Governance(0xAc43e14c018490D045a774008648c701cda8C6b3);
 
     // V1 Stores
+    IProjects immutable public projectsV1 = IProjects(0x9b5a4053FfBB11cA9cd858AAEE43cc95ab435418);    
     IFundingCycles immutable public fundingCycles = IFundingCycles(0xf507B2A1dD7439201eb07F11E1d62AfB29216e2E);
     IModStore immutable public modStore = IModStore(0xB9E4B658298C7A36BdF4C2832042A5D6700c3Ab8);
 
@@ -39,6 +44,11 @@ contract DeprecateSimulateScript is Script {
     function setUp() public {}
 
     function run() public {
+        // Forge doesn't realize that this wallet will be funded on the tenderly RPC
+        // So we fund the wallet by having the WETH address send it money
+        vm.broadcast(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
+        fundedWallet.call{value: 100 ether}('');
+
         // Step 1: Migrate to V1.1
         vm.broadcast(multisig);
         terminalV1.migrate(
@@ -124,7 +134,116 @@ contract DeprecateSimulateScript is Script {
             new JBFundAccessConstraints[](0),
             ""
         );
+
+        // Create a new user that will create projects etc.
+        address _newUser = address(0xbeef);
+        // Fund the wallet so they can pay for gas
+        vm.broadcast(fundedWallet);
+        fundedWallet.call{value: 1 ether}('');
+
+        // Run some tests
+        testV1(_newUser);
     }
+
+    /**
+     * Tests
+    */
+
+    function testV1(address _projectOwner) public {
+        // Create project that will get paid by another project
+        uint256 _recipientProject = _createV1Project(_projectOwner, 'recipient_project', new PayoutMod[](0));
+
+        // Create the payout mods
+        PayoutMod[] memory _payoutMods = new PayoutMod[](2);
+        _payoutMods[0] = PayoutMod({
+            preferUnstaked: false,
+            percent: 4_000,
+            lockedUntil: 0,
+            beneficiary: payable(_projectOwner),
+            allocator: IModAllocator(address(0)),
+            projectId: 0
+        });
+        _payoutMods[1] = PayoutMod({
+            preferUnstaked: false,
+            percent: 5_000,
+            lockedUntil: 0,
+            beneficiary: payable(_projectOwner),
+            allocator: IModAllocator(address(0)),
+            projectId: uint56(_recipientProject)
+        });
+
+        uint256 _optimisticProjectId = _createV1Project(_projectOwner, 'payout_project', _payoutMods);
+
+        // Pay the project
+        vm.broadcast(fundedWallet);
+        uint256 _fundingCycleId = terminalV1.pay{value: 10 ether}(_optimisticProjectId, fundedWallet, '', false);
+
+        // Assert that the the fee is 0
+        vm.expectEmit(true, true, true, true);
+        emit Tap( _fundingCycleId, _optimisticProjectId, _projectOwner, 10 ether, 0, 10 ether, 1 ether, 0 ether, _projectOwner);
+
+        // Distribute funds
+        vm.broadcast(_projectOwner);
+        ITerminalV1(address(terminalV1)).tap(_optimisticProjectId, 10 ether, 0, 10 ether);
+
+        // Assert that the project got paid the expected amount
+        assertEq(
+            ITerminalV1(address(terminalV1)).balanceOf(_recipientProject),
+            5 ether
+        );
+    }
+
+    /**
+     * Helpers
+     */
+
+    function _createV1Project(address _projectOwner, bytes32 _handle, PayoutMod[] memory _payoutMods) internal returns(uint256 _projectId) {
+        _projectId = projectsV1.count() + 1;
+
+        // Create a new project
+        vm.broadcast(_projectOwner);
+        ITerminalV1(address(terminalV1)).deploy(
+            _projectOwner,
+            _handle,
+            '',
+            FundingCycleProperties({
+                target: 10 ether,
+                currency: 0,
+                duration: 14,
+                cycleLimit: 0,
+                discountRate: 0,
+                ballot: IFundingCycleBallot(0x6d6da471703647Fd8b84FFB1A29e037686dBd8b2)
+            }),
+            FundingCycleMetadata({
+                reservedRate: 0,
+                bondingCurveRate: 0,
+                reconfigurationBondingCurveRate: 0
+            }),
+            _payoutMods,
+            new TicketMod[](0)
+        );
+    }
+
+    event Tap(
+        uint256 indexed fundingCycleId,
+        uint256 indexed projectId,
+        address indexed beneficiary,
+        uint256 amount,
+        uint256 currency,
+        uint256 netTransferAmount,
+        uint256 beneficiaryTransferAmount,
+        uint256 govFeeAmount,
+        address caller
+    );
+
+    event Pay(
+        uint256 indexed fundingCycleId,
+        uint256 indexed projectId,
+        address indexed beneficiary,
+        uint256 amount,
+        string note,
+        address caller
+    );
 }
 
 interface Governance {
