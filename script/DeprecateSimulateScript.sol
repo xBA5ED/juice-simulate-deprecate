@@ -143,6 +143,7 @@ contract DeprecateSimulateScript is Script, Test {
 
         // Run some tests
         testV1(_newUser);
+        testV1_1(_newUser);
     }
 
     /**
@@ -193,6 +194,50 @@ contract DeprecateSimulateScript is Script, Test {
         );
     }
 
+     function testV1_1(address _projectOwner) public {
+        // Create project that will get paid by another project
+        uint256 _recipientProject = _createV1_1Project(_projectOwner, 'recipient_project_1_1', new PayoutMod[](0));
+
+        // Create the payout mods
+        PayoutMod[] memory _payoutMods = new PayoutMod[](2);
+        _payoutMods[0] = PayoutMod({
+            preferUnstaked: false,
+            percent: 4_000,
+            lockedUntil: 0,
+            beneficiary: payable(_projectOwner),
+            allocator: IModAllocator(address(0)),
+            projectId: 0
+        });
+        _payoutMods[1] = PayoutMod({
+            preferUnstaked: false,
+            percent: 5_000,
+            lockedUntil: 0,
+            beneficiary: payable(_projectOwner),
+            allocator: IModAllocator(address(0)),
+            projectId: uint56(_recipientProject)
+        });
+
+        uint256 _optimisticProjectId = _createV1_1Project(_projectOwner, 'payout_project_1_1', _payoutMods);
+
+        // Pay the project
+        vm.broadcast(fundedWallet);
+        uint256 _fundingCycleId = ITerminal(address(terminalV1_1)).pay{value: 10 ether}(_optimisticProjectId, fundedWallet, '', false);
+
+        // Assert that the the fee is 0
+        vm.expectEmit(true, true, true, true);
+        emit Tap( _fundingCycleId, _optimisticProjectId, _projectOwner, 10 ether, 0, 10 ether, 1 ether, 0 ether, _projectOwner);
+
+        // Distribute funds
+        vm.broadcast(_projectOwner);
+        terminalV1_1.tap(_optimisticProjectId, 10 ether, 0, 10 ether);
+
+        // Assert that the project got paid the expected amount
+        assertEq(
+            terminalV1_1.balanceOf(_recipientProject),
+            5 ether
+        );
+    }
+
     /**
      * Helpers
      */
@@ -218,6 +263,40 @@ contract DeprecateSimulateScript is Script, Test {
                 reservedRate: 0,
                 bondingCurveRate: 0,
                 reconfigurationBondingCurveRate: 0
+            }),
+            _payoutMods,
+            new TicketMod[](0)
+        );
+    }
+
+    /**
+     * Helpers
+     */
+
+    function _createV1_1Project(address _projectOwner, bytes32 _handle, PayoutMod[] memory _payoutMods) internal returns(uint256 _projectId) {
+        _projectId = projectsV1.count() + 1;
+
+        // Create a new project
+        vm.broadcast(_projectOwner);
+        terminalV1_1.deploy(
+            _projectOwner,
+            _handle,
+            '',
+            FundingCycleProperties({
+                target: 10 ether,
+                currency: 0,
+                duration: 14,
+                cycleLimit: 0,
+                discountRate: 0,
+                ballot: IFundingCycleBallot(0x6d6da471703647Fd8b84FFB1A29e037686dBd8b2)
+            }),
+            FundingCycleMetadata2({
+                reservedRate: 0,
+                bondingCurveRate: 0,
+                reconfigurationBondingCurveRate: 0,
+                payIsPaused: false,
+                ticketPrintingIsAllowed: false,
+                treasuryExtension: ITreasuryExtension(address(0))
             }),
             _payoutMods,
             new TicketMod[](0)
