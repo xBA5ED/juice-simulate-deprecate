@@ -278,10 +278,6 @@ contract DeprecateSimulateScript is Script, Test {
         // Create the project that will get paid and will forward part of the ETH on distribution.
         uint256 _payProjectId = _createV2Project(_projectOwner, _groupedSplits);
 
-        // // Forward a single block
-        // vm.roll(block.number + 1);
-        // vm.warp(block.timestamp + 1);
-
         // We need the funding cycle configuration number of the PayProject
         (JBFundingCycle memory _ppFC,,) = controller.latestConfiguredFundingCycleOf(_payProjectId);
         // We need the funding cycle configuration number of the recipient project
@@ -299,7 +295,6 @@ contract DeprecateSimulateScript is Script, Test {
             "",
             bytes("")
         ); 
-
 
         // Assert that the project got paid the expected amount
         vm.expectEmit(true, true, true, true);
@@ -468,9 +463,6 @@ contract DeprecateSimulateScript is Script, Test {
             ''
         );
     }
-
-
-
 
     /**
      * V1 Events
