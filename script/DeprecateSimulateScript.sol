@@ -16,6 +16,9 @@ import "@jbx-protocol/contracts-v2/contracts/interfaces/IJBDirectory.sol";
 import "@jbx-protocol/contracts-v2/contracts/interfaces/IJBSplitsStore.sol"; 
 import "@jbx-protocol/contracts-v2/contracts/interfaces/IJBPayoutRedemptionPaymentTerminal.sol";
 import "@jbx-protocol/contracts-v2/contracts/libraries/JBSplitsGroups.sol";
+import "@jbx-protocol/contracts-v2/contracts/libraries/JBConstants.sol";
+import "@jbx-protocol/contracts-v2/contracts/libraries/JBTokens.sol";
+import "@jbx-protocol/contracts-v2/contracts/libraries/JBCurrencies.sol";
 
 contract DeprecateSimulateScript is Script, Test {
     address immutable fundedWallet = address(0x0Bc1b73d735083Adb4f26671BC90B68a86B33dE4);
@@ -33,6 +36,7 @@ contract DeprecateSimulateScript is Script, Test {
     IModStore immutable public modStore = IModStore(0xB9E4B658298C7A36BdF4C2832042A5D6700c3Ab8);
 
     // V2 Stores
+    IJBController immutable public controller = IJBController(0x4e3ef8AFCC2B52E4e704f4c8d9B7E7948F651351);
     IJBDirectory immutable public directory = IJBDirectory(0xCc8f7a89d89c2AB3559f484E0C656423E979ac9C);
     IJBSplitsStore immutable public splitStore = IJBSplitsStore(0xFBE1075826B7FFd898cf8D944885ba6a8D714A7F);
 
@@ -144,6 +148,7 @@ contract DeprecateSimulateScript is Script, Test {
         // Run some tests
         testV1(_newUser);
         testV1_1(_newUser);
+        testV2(_newUser);
     }
 
     /**
@@ -238,6 +243,106 @@ contract DeprecateSimulateScript is Script, Test {
         );
     }
 
+    function testV2(address _projectOwner) public {
+        // Create project that will get paid by another project
+        uint256 _recipientProject = _createV2Project(_projectOwner, new JBGroupedSplits[](0));
+
+        // Create the splits
+        JBSplit[] memory _splits = new JBSplit[](2);
+        _splits[0] = JBSplit({
+            preferClaimed: false,
+            preferAddToBalance: false,
+            percent: JBConstants.SPLITS_TOTAL_PERCENT / 10 * 9,
+            projectId: _recipientProject,
+            beneficiary: payable(_projectOwner),
+            lockedUntil: 0,
+            allocator: IJBSplitAllocator(address(0))
+        });
+        _splits[1] = JBSplit({
+            preferClaimed: false,
+            preferAddToBalance: false,
+            percent: JBConstants.SPLITS_TOTAL_PERCENT / 10,
+            projectId: 0,
+            beneficiary: payable(_projectOwner),
+            lockedUntil: 0,
+            allocator: IJBSplitAllocator(address(0))
+        });
+
+        // Create the grouped splits
+        JBGroupedSplits[] memory _groupedSplits = new JBGroupedSplits[](1);
+        _groupedSplits[0] = JBGroupedSplits({
+            group: JBSplitsGroups.ETH_PAYOUT,
+            splits: _splits
+        });
+
+        // Create the project that will get paid and will forward part of the ETH on distribution.
+        uint256 _payProjectId = _createV2Project(_projectOwner, _groupedSplits);
+
+        // // Forward a single block
+        // vm.roll(block.number + 1);
+        // vm.warp(block.timestamp + 1);
+
+        // We need the funding cycle configuration number of the PayProject
+        (JBFundingCycle memory _ppFC,,) = controller.latestConfiguredFundingCycleOf(_payProjectId);
+        // We need the funding cycle configuration number of the recipient project
+        (JBFundingCycle memory _rpFC,,) = controller.latestConfiguredFundingCycleOf(_payProjectId);
+
+        // Pay the project
+        vm.broadcast(fundedWallet);
+        terminalV2.pay{value: 10 ether}(
+            _payProjectId,
+            10 ether,
+            JBTokens.ETH,
+            _projectOwner,
+            0,
+            false,
+            "",
+            bytes("")
+        ); 
+
+
+        // Assert that the project got paid the expected amount
+        vm.expectEmit(true, true, true, true);
+        emit Pay(
+            _rpFC.configuration,
+            1,
+            _recipientProject,
+            address(terminalV2),
+            address(_projectOwner),
+            9 ether,
+            0,
+            "",
+            abi.encode(_payProjectId),
+            address(_projectOwner)
+        );
+
+        // Assert that the the fee is 0
+        vm.expectEmit(true, true, true, true);
+        emit DistributePayouts(
+            _ppFC.configuration,
+            1,
+            _payProjectId,
+            address(_projectOwner),
+            10 ether,
+            10 ether,
+            0 ether,
+            0 ether,
+            "",
+            address(_projectOwner)
+        );
+
+        // Distribute the funds
+        vm.broadcast(_projectOwner);
+        terminalV2.distributePayoutsOf(
+            _payProjectId,
+            10 ether,
+            JBCurrencies.ETH,
+            JBTokens.ETH,
+            0,
+            ""
+        );
+    }
+
     /**
      * Helpers
      */
@@ -303,6 +408,73 @@ contract DeprecateSimulateScript is Script, Test {
         );
     }
 
+    function _createV2Project(address _projectOwner, JBGroupedSplits[] memory _groupedSplits) internal returns (uint256 _projectId) {
+        // Initialize the terminal array .
+        IJBPaymentTerminal[] memory _terminals = new IJBPaymentTerminal[](1);
+        _terminals[0] = IJBPaymentTerminal(address(terminalV2));
+
+        JBFundAccessConstraints[] memory _fundAccessConstraints = new JBFundAccessConstraints[](1);
+        _fundAccessConstraints[0] = JBFundAccessConstraints({
+            terminal: IJBPaymentTerminal(address(terminalV2)),
+            token: JBTokens.ETH,
+            distributionLimit: 10 ether,
+            distributionLimitCurrency: JBCurrencies.ETH,
+            overflowAllowance: 0,
+            overflowAllowanceCurrency: JBCurrencies.ETH
+        });
+
+        // Create a new project
+        vm.broadcast(_projectOwner);
+        return controller.launchProjectFor(
+            // Project is owned by this contract.
+            _projectOwner,
+            JBProjectMetadata({
+                content: '',
+                domain: 0
+            }),
+            JBFundingCycleData ({
+                duration: 14,
+                // Don't mint project tokens.
+                weight: 0,
+                discountRate: 0,
+                ballot: IJBFundingCycleBallot(address(0))
+            }),
+            JBFundingCycleMetadata ({
+                global: JBGlobalFundingCycleMetadata({
+                    allowSetTerminals: false,
+                    allowSetController: false
+                }),
+                reservedRate: 0,
+                redemptionRate: 0,
+                ballotRedemptionRate: 0,
+                pausePay: false,
+                pauseDistributions: false,
+                pauseRedeem: false,
+                pauseBurn: false,
+                allowMinting: false,
+                allowChangeToken: false,
+                allowTerminalMigration: false,
+                allowControllerMigration: false,
+                holdFees: false,
+                useTotalOverflowForRedemptions: false,
+                useDataSourceForPay: false,
+                useDataSourceForRedeem: false,
+                dataSource: address(0)
+            }),
+            0,
+            _groupedSplits,
+            _fundAccessConstraints,
+            _terminals,
+            ''
+        );
+    }
+
+
+
+
+    /**
+     * V1 Events
+     */
     event Tap(
         uint256 indexed fundingCycleId,
         uint256 indexed projectId,
@@ -321,6 +493,36 @@ contract DeprecateSimulateScript is Script, Test {
         address indexed beneficiary,
         uint256 amount,
         string note,
+        address caller
+    );
+
+    /**
+     * V2 Events
+     */
+
+    event DistributePayouts(
+        uint256 indexed fundingCycleConfiguration,
+        uint256 indexed fundingCycleNumber,
+        uint256 indexed projectId,
+        address beneficiary,
+        uint256 amount,
+        uint256 distributedAmount,
+        uint256 fee,
+        uint256 beneficiaryDistributionAmount,
+        string memo,
+        address caller
+    );
+
+    event Pay(
+        uint256 indexed fundingCycleConfiguration,
+        uint256 indexed fundingCycleNumber,
+        uint256 indexed projectId,
+        address payer,
+        address beneficiary,
+        uint256 amount,
+        uint256 beneficiaryTokenCount,
+        string memo,
+        bytes metadata,
         address caller
     );
 }
